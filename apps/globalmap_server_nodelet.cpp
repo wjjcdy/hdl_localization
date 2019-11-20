@@ -37,11 +37,21 @@ public:
     nh = getNodeHandle();
     mt_nh = getMTNodeHandle();
     private_nh = getPrivateNodeHandle();
-
+    NODELET_DEBUG("OPEND PCD MAP");
     initialize_params();
 
     // publish globalmap with "latched" publisher
     globalmap_pub = nh.advertise<sensor_msgs::PointCloud2>("/globalmap", 5, true);
+
+    // added by wangjiajia
+    for (int i =0;i<globalmap->points.size();++i) {
+      PointT point;
+      point.x = globalmap->points[i].z;
+      point.y = globalmap->points[i].x;
+      point.z = globalmap->points[i].y;
+      globalmap->points[i] = point;
+    }    
+
     globalmap_pub.publish(globalmap);
   }
 
@@ -54,7 +64,7 @@ private:
     globalmap->header.frame_id = "map";
 
     // downsample globalmap
-    double downsample_resolution = private_nh.param<double>("downsample_resolution", 0.1);
+    double downsample_resolution = private_nh.param<double>("downsample_resolution", 0.2);
     boost::shared_ptr<pcl::VoxelGrid<PointT>> voxelgrid(new pcl::VoxelGrid<PointT>());
     voxelgrid->setLeafSize(downsample_resolution, downsample_resolution, downsample_resolution);
     voxelgrid->setInputCloud(globalmap);
