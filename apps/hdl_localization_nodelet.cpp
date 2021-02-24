@@ -58,19 +58,25 @@ public:
   }
 
 private:
+  // 初始化定位参数
   void initialize_params() {
     // intialize scan matching method
     double downsample_resolution = private_nh.param<double>("downsample_resolution", 0.1);
+    // NDT 临近搜索方法
     std::string ndt_neighbor_search_method = private_nh.param<std::string>("ndt_neighbor_search_method", "DIRECT7");
-
+    // ndt 分辨率
     double ndt_resolution = private_nh.param<double>("ndt_resolution", 1.0);
     boost::shared_ptr<pcl::VoxelGrid<PointT>> voxelgrid(new pcl::VoxelGrid<PointT>());
     voxelgrid->setLeafSize(downsample_resolution, downsample_resolution, downsample_resolution);
+    // 设置体素滤波器
     downsample_filter = voxelgrid;
 
+    // 设置点云匹配模型为ndt 模型
+    // 采用pcl 多线程库
     pclomp::NormalDistributionsTransform<PointT, PointT>::Ptr ndt(new pclomp::NormalDistributionsTransform<PointT, PointT>());
     ndt->setTransformationEpsilon(0.01);
     ndt->setResolution(ndt_resolution);
+    // 三种临近搜索方法选择
     if(ndt_neighbor_search_method == "DIRECT1") {
       NODELET_INFO("search_method DIRECT1 is selected");
       ndt->setNeighborhoodSearchMethod(pclomp::DIRECT1);
@@ -91,6 +97,7 @@ private:
     // initialize pose estimator
     if(private_nh.param<bool>("specify_init_pose", true)) {
       NODELET_INFO("initialize pose estimator with specified parameters!!");
+      // 新赋值， reset为智能指针销毁并赋新值
       pose_estimator.reset(new hdl_localization::PoseEstimator(registration,
         ros::Time::now(),
         Eigen::Vector3f(private_nh.param<double>("init_pos_x", 0.0), private_nh.param<double>("init_pos_y", 0.0), private_nh.param<double>("init_pos_z", 0.0)),
@@ -107,6 +114,7 @@ private:
    */
   void imu_callback(const sensor_msgs::ImuConstPtr& imu_msg) {
     std::lock_guard<std::mutex> lock(imu_data_mutex);
+    // 收集每帧imu message
     imu_data.push_back(imu_msg);
   }
 
@@ -116,16 +124,19 @@ private:
    */
   void points_callback(const sensor_msgs::PointCloud2ConstPtr& points_msg) {
     std::lock_guard<std::mutex> estimator_lock(pose_estimator_mutex);
+    // 位置估计器未初始化，需等待初始化
     if(!pose_estimator) {
       NODELET_ERROR("waiting for initial pose input!!");
       return;
     }
 
+    // 等待全局地图，即定位地图
     if(!globalmap) {
       NODELET_ERROR("globalmap has not been received!!");
       return;
     }
 
+    // 接收激光点云数据，并转换为pcl格式
     const auto& stamp = points_msg->header.stamp;
     pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>());
     pcl::fromROSMsg(*points_msg, *cloud);
@@ -134,29 +145,35 @@ private:
       NODELET_ERROR("cloud is empty!!");
       return;
     }
-
+    // 点云降采样
     auto filtered = downsample(cloud);
 
-    // predict
+    // predict， 根据控制量和时间间隔，预测每时刻的位置和协方差
     if(!use_imu) {
+      // 根据上刻位置，预测新位置
+      // 无imu，则采用0角速度和0线加速度预测，即恒速度模型
       pose_estimator->predict(stamp, Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero());
     } else {
       std::lock_guard<std::mutex> lock(imu_data_mutex);
       auto imu_iter = imu_data.begin();
       for(imu_iter; imu_iter != imu_data.end(); imu_iter++) {
+        // 时间戳对齐
         if(stamp < (*imu_iter)->header.stamp) {
           break;
         }
+        // 根据imu预测每一步位置，预测当前点云时间刻位置
         const auto& acc = (*imu_iter)->linear_acceleration;
         const auto& gyro = (*imu_iter)->angular_velocity;
         double gyro_sign = invert_imu ? -1.0 : 1.0;
         pose_estimator->predict((*imu_iter)->header.stamp, Eigen::Vector3f(acc.x, acc.y, acc.z), gyro_sign * Eigen::Vector3f(gyro.x, gyro.y, gyro.z));
       }
+      // 剔除已过时的imu message
       imu_data.erase(imu_data.begin(), imu_iter);
     }
 
     // correct
     auto t1 = ros::WallTime::now();
+    // 后端点云匹配
     auto aligned = pose_estimator->correct(filtered);
     auto t2 = ros::WallTime::now();
 
@@ -164,12 +181,15 @@ private:
     double avg_processing_time = std::accumulate(processing_time.begin(), processing_time.end(), 0.0) / processing_time.size();
     // NODELET_INFO_STREAM("processing_time: " << avg_processing_time * 1000.0 << "[msec]");
 
+    // 发布已对齐激光点云数据
     if(aligned_pub.getNumSubscribers()) {
       aligned->header.frame_id = "map";
       aligned->header.stamp = cloud->header.stamp;
       aligned_pub.publish(aligned);
     }
 
+    // 获得匹配的后验位姿，并发布
+    // 仅获取关系pose 和  姿态
     publish_odometry(points_msg->header.stamp, pose_estimator->matrix());
   }
 
@@ -182,7 +202,7 @@ private:
     pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>());
     pcl::fromROSMsg(*points_msg, *cloud);
     globalmap = cloud;
-
+    // 将整张地图作为匹配目标点云
     registration->setInputTarget(globalmap);
   }
 
@@ -195,6 +215,7 @@ private:
     std::lock_guard<std::mutex> lock(pose_estimator_mutex);
     const auto& p = pose_msg->pose.pose.position;
     const auto& q = pose_msg->pose.pose.orientation;
+    // 重新设置初始位置
     pose_estimator.reset(
           new hdl_localization::PoseEstimator(
             registration,
@@ -231,6 +252,7 @@ private:
   void publish_odometry(const ros::Time& stamp, const Eigen::Matrix4f& pose) {
     // broadcast the transform over tf
     geometry_msgs::TransformStamped odom_trans = matrix2transform(stamp, pose, "map", "velodyne");
+    //发布map与pose的tf变换
     pose_broadcaster.sendTransform(odom_trans);
 
     // publish the transform
@@ -247,7 +269,7 @@ private:
     odom.twist.twist.linear.x = 0.0;
     odom.twist.twist.linear.y = 0.0;
     odom.twist.twist.angular.z = 0.0;
-
+    // 发布里程计
     pose_pub.publish(odom);
   }
 
@@ -261,13 +283,14 @@ private:
    */
   geometry_msgs::TransformStamped matrix2transform(const ros::Time& stamp, const Eigen::Matrix4f& pose, const std::string& frame_id, const std::string& child_frame_id) {
     Eigen::Quaternionf quat(pose.block<3, 3>(0, 0));
+    // 4元数序列化
     quat.normalize();
     geometry_msgs::Quaternion odom_quat;
     odom_quat.w = quat.w();
     odom_quat.x = quat.x();
     odom_quat.y = quat.y();
     odom_quat.z = quat.z();
-
+    // tf 变换关系
     geometry_msgs::TransformStamped odom_trans;
     odom_trans.header.stamp = stamp;
     odom_trans.header.frame_id = frame_id;
